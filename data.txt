@@ -22,7 +22,7 @@
 #    63C0DF （浅天蓝 / Light Sky Blue）
 #    B8B8B8 （中性灰 / Neutral Grey）
 # ════════════════════════════════════════════════════════════
-标题 / title = 全国人大常委会 / United States Senate
+标题 / title = 美国参议院 / United States Senate
 
 共和党 / Republican Party     53     #E1192C
 民主党 / Democratic Party     45     #2B4EA0

@@ -1,0 +1,29 @@
+# ════════════════════════════════════════════════════════════
+#  data.txt —— 席位图数据文件 / Seat Map Data File
+# ════════════════════════════════════════════════════════════
+#  用记事本打开这个文件，按下面的格式填就行：
+#  Open this file with Notepad, fill in per the format below:
+#
+#  「标题 / title = xxx」    →  设定图片标题（可选） / Set chart title (optional)
+#  「党派名 / party_name  席位 / seats  颜色 / color」→  每行一个党派 / One party per line
+#
+#  注意 / Notes：
+#    · # 开头的是注释，会被忽略 / Lines starting with # are comments, ignored
+#    · 党派名、席位、颜色之间用空格或 Tab 隔开 / Separate party, seats, color with spaces or Tab
+#    · 颜色写 #RRGGBB 或者纯 RRGGBB 都行 / Color can be #RRGGBB or plain RRGGBB
+#    常见颜色 / Common Colors：
+#    E1192C （红 / Red）
+#    2B4EA0 （深蓝 / Deep Blue）
+#    FBB90D （金黄/黄橙色 / Gold/Yellow-Orange）
+#    5DBA40 （鲜绿 / Bright Green）
+#    0077C8 （亮蓝 / Light Blue）
+#    1E3A6C （蓝灰 / Blue-Grey）
+#    9C1C5C （酒红紫 / Wine Red-Purple）
+#    63C0DF （浅天蓝 / Light Sky Blue）
+#    B8B8B8 （中性灰 / Neutral Grey）
+# ════════════════════════════════════════════════════════════
+标题 / title = 全国人大常委会 / United States Senate
+
+共和党 / Republican Party     53     #E1192C
+民主党 / Democratic Party     45     #2B4EA0
+无党籍 / Nonpartisan     2     #0077C8

@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+"""
+seatmap.py  ——  议会席位图（傻瓜式） / Parliament Seat Map (no-brainer)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  用法 / Usage：
+    1. 用记事本打开同目录下的 data.txt / Open data.txt in the same folder with Notepad
+    2. 按格式填入党派、席位、颜色 / Fill in parties, seats, colors per the format
+    3. 双击运行本文件 → 自动生成 seatmap.svg（浏览器打开即可查看）
+       Double-click to run → auto-generates SVG (open in browser to view)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  无需安装任何第三方库，Python 自带即可运行
+  No third-party libraries needed; runs with built-in Python
+"""
+
+import io, json, math, os, re, sys, tempfile
+from pathlib import Path
+
+# ════════════════════ 可调参数 / Tunable Parameters ════════════════════
+# 如果你觉得图太大/太小/点太大/太小，改下面几个数字就行
+# If the chart is too big/small or dots are too big/small, tweak the numbers below
+
+WIDTH      = 1200        # 图片宽度（像素），越大越清晰 / Image width (px), larger = sharper
+DOT_SIZE   = 14          # 每个席位小圆点的直径（像素） / Diameter of each seat dot (px)
+EMPTY      = 0           # 空缺席位数（灰色空心圆），0 表示没有空席 / Empty seats (grey hollow circles), 0 = none
+OUTPUT     = None        # 设为 None 则用标题自动命名文件；也可手动指定固定文件名
+                          # Set to None to auto-name file from title; or manually specify a fixed filename
+
+# ════════════════════ 内部参数（一般不用动） / Internal Params (usually don't touch) ═════════════════════
+PAD        = 40          # 四边留白 / Padding on all sides
+MIN_LAYERS = 5           # 最少层数，小国会至少撑到这个层数 / Minimum layers, small parliaments expand to at least this
+MAX_LAYERS = 30          # 最多层数，防止席位过多时层数爆炸 / Maximum layers, prevents layer explosion for huge parliaments
+
+# 空缺席位标记 / Empty seat marker
+EMPTY_SEAT = object()
+
+
+# ════════════════════ data.txt 解析 / data.txt Parsing ════════════════════
+
+def parse_data_txt(path):
+    """
+    解析 data.txt，格式极其简单 / Parse data.txt, format is super simple：
+    
+        # 这是注释（以 # 开头） / This is a comment (starts with #)
+        标题 / title = 第42届议会 / 42nd Parliament
+        
+        保守党 / Conservative    210    #3366CC
+        工党 / Labour            180    #CC3333
+        自由民主党 / LibDem        40    #FF9933
+        绿党 / Green              15    #33AA55
+        
+    规则 / Rules：
+      - # 开头的行为注释，忽略 / Lines starting with # are comments, ignored
+      - 「标题 = xxx」设定标题（可选） / 「title = xxx」sets the title (optional)
+      - 其余有效行：党派名  席位数  颜色  （空格/Tab 分隔均可）
+        Remaining valid lines: party_name  seat_count  color  (space/Tab separated)
+      - 颜色写 #RRGGBB 或纯 RRGGBB 都行 / Color can be #RRGGBB or plain RRGGBB
+    """
+    if not os.path.isfile(path):
+        print(f"[X] 找不到 / Not found: {path}，请在同目录下创建 data.txt！ / Please create data.txt in the same folder!")
+        print()
+        print("   data.txt 格式示例 / Format example：")
+        print("   ─────────────────────────────────────")
+        print("   标题 / title = 我的议会 / My Parliament")
+        print()
+        print("   保守党 / Conservative    210    #3366CC")
+        print("   工党 / Labour            180    #CC3333")
+        print("   自由民主党 / LibDem        40    #FF9933")
+        print("   ─────────────────────────────────────")
+        sys.exit(1)
+
+    with open(path, "r", encoding="utf-8-sig") as f:
+        lines = f.readlines()
+
+    title = ""
+    parties = []
+
+    for line in lines:
+        line = line.strip()
+        # 跳过空行和注释 / Skip blank lines and comments
+        if not line or line.startswith("#"):
+            continue
+        # 标题行：标题 = xxx / Title line: title = xxx
+        if line.startswith("标题") and "=" in line:
+            _, val = line.split("=", 1)
+            title = val.strip()
+            continue
+        if line.startswith("title") and "=" in line.lower():
+            _, val = line.split("=", 1)
+            title = val.strip()
+            continue
+        # 数据行：从右往左解析 / Data line: parse from right to left
+        # 最后两个字段一定是「席位数」和「颜色」，前面剩下的全部是党派名
+        # The last two fields are always seat_count and color; everything before is the party name
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        # 从右端取颜色和席位 / Grab color and seat count from the right end
+        color = parts[-1]
+        try:
+            seats = int(parts[-2])
+        except ValueError:
+            continue
+        # 剩下的全部拼成党派名 / Everything else is the party name
+        name = " ".join(parts[:-2])
+        if seats > 0:
+            parties.append({"name": name, "seats": seats, "color": color})
+
+    if not parties:
+        print("[X] data.txt 中没有有效的党派数据！ / No valid party data in data.txt!")
+        print()
+        print("   请确保每行格式为：党派名  席位数  颜色 / Please ensure each line is: party_name  seat_count  color")
+        print("   例如 / e.g.：保守党 / Conservative  210  #3366CC")
+        sys.exit(1)
+
+    return title, parties
+
+
+# ════════════════════ 布局算法 / Layout Algorithm ════════════════════
+
+def build_seat_list(parties, empty_count=0):
+    """各党派展开为一维席位列表，末尾追加空席 / Expand each party into a flat seat list, append empty seats at end"""
+    seats = []
+    for p in parties:
+        seats.extend([p] * int(p["seats"]))
+    if empty_count > 0:
+        seats.extend([EMPTY_SEAT] * empty_count)
+    return seats
+
+
+def smart_ring_gap(total, radius_max, dot_r, min_layers, max_layers, canvas_width, pad):
+    """
+    智能环宽函数 / Smart ring gap function：
+      根据总席位和可用半径，自动计算合适的环间距（arc_gap），
+      使得层数落在 [min_layers, max_layers] 之间，席位不超出画布。
+      Computes a suitable arc gap so layer count falls within [min_layers, max_layers]
+      and seats stay within canvas bounds.
+    """
+    def simulate(gap):
+        """返回 (层数, 每层席位数列表, positions, out_of_bounds_px)"""
+        spacing = dot_r * 2 + gap
+        cx = canvas_width / 2
+        bottom_y = canvas_width * 0.65 - pad  # 近似，仅用于检测越界
+        layers_seats = []
+        remaining = total
+        r = radius_max
+        while remaining > 0 and len(layers_seats) < 200:
+            if r < dot_r:
+                layers_seats.append(remaining)
+                break
+            capacity = max(1, int(math.pi * r / spacing))
+            take = min(capacity, remaining)
+            layers_seats.append(take)
+            remaining -= take
+            r -= spacing
+
+        # 生成坐标检测越界 / Generate positions to check out-of-bounds
+        positions = []
+        for li, count in enumerate(layers_seats):
+            r = max(dot_r, radius_max - li * spacing)
+            if count == 1:
+                positions.append((cx, bottom_y - r))
+            else:
+                ang = spacing / r
+                half = (count - 1) * ang / 2
+                for i in range(count):
+                    theta = (math.pi / 2 + half) - i * ang
+                    positions.append((cx + r * math.cos(theta), bottom_y - r * math.sin(theta)))
+
+        min_x = min(p[0] for p in positions)
+        max_x = max(p[0] for p in positions)
+        oob = max(0, pad - min_x) + max(0, max_x - (canvas_width - pad))
+
+        # 重叠检测 / Overlap check
+        overlaps = 0
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                dx = positions[i][0] - positions[j][0]
+                dy = positions[i][1] - positions[j][1]
+                if math.sqrt(dx * dx + dy * dy) < dot_r * 2 * 0.85:
+                    overlaps += 1
+                    if overlaps > 20:
+                        break
+            if overlaps > 20:
+                break
+
+        return len(layers_seats), layers_seats, oob, overlaps
+
+    best_gap = 0.0
+    best_score = float('inf')
+
+    for n in range(min_layers, max_layers + 1):
+        max_spacing = (radius_max - dot_r) / (n - 1) if n > 1 else radius_max
+        min_spacing = dot_r * 2
+        if max_spacing < min_spacing:
+            continue
+
+        # 二分找 spacing 使估算 ≈ total / Binary search spacing so estimate ≈ total
+        lo, hi = min_spacing, max_spacing
+        for _ in range(30):
+            mid = (lo + hi) / 2.0
+            est = 0
+            for i in range(n):
+                r = radius_max - i * mid
+                if r < dot_r:
+                    r = dot_r
+                est += max(1, int(math.pi * r / mid))
+            if est > total:
+                lo = mid
+            else:
+                hi = mid
+
+        spacing = (lo + hi) / 2.0
+        gap = spacing - dot_r * 2
+        actual_layers, _, oob, overlaps = simulate(gap)
+
+        score = oob * 1000 + overlaps * 50 + abs(actual_layers - n) * 5
+        if score < best_score:
+            best_score = score
+            best_gap = gap
+
+    return max(0.0, best_gap)
+
+
+def chamber_layout(total, cx, bottom_y, radius_max, dot_r, arc_gap):
+    """
+    核心布局算法 / Core layout algorithm：
+      - 每个席位之间弧上圆心间距固定 = dot_size + arc_gap
+        Fixed arc distance between seat centers = dot_size + arc_gap
+      - 从最外层开始逐层填充 / Fill layer by layer from outermost
+      - 每层能放多少由弧长决定，不满就空着（不拉伸不压缩）
+        Each layer's capacity is determined by arc length; leave empty if not full (no stretch/compress)
+      - 不是强制半圆，弧扫多大角度由该层席位数量决定
+        Not a forced semicircle; arc sweep angle is determined by seat count on that layer
+    返回 [(x, y), ...] / Returns [(x, y), ...]
+    """
+    positions = []
+    if total <= 0:
+        return positions
+
+    # 圆心之间沿弧的间距（像素） / Arc distance between centers (px)
+    spacing = dot_r * 2 + arc_gap
+
+    # 先决定分几层、每层放几个 / First decide how many layers and seats per layer
+    layers = []
+    remaining = total
+    layer_idx = 0
+    while remaining > 0:
+        r = radius_max - layer_idx * spacing
+        if r < spacing / 2:
+            r = spacing / 2
+        # 该层最多容纳的席位：半圆弧长 / 固定间距 / Max seats on this layer: semicircle arc length / fixed spacing
+        arc_len = math.pi * r
+        capacity = max(1, int(arc_len / spacing))
+        take = min(capacity, remaining)
+        layers.append(take)
+        remaining -= take
+        layer_idx += 1
+        if layer_idx > 1000:
+            break
+
+    # 逐层绘制：每层从弧顶向左右展开 / Draw layer by layer: each layer spreads left & right from arc top
+    # θ = π/2 是弧顶（正上方），向左 θ 增大，向右 θ 减小
+    # θ = π/2 is the arc top (straight up), θ increases leftward, θ decreases rightward
+    # 席位沿弧均匀分布，间距严格相等 / Seats evenly distributed along arc, strictly equal spacing
+    for li, count in enumerate(layers):
+        r = max(dot_r, radius_max - li * spacing)
+        if count == 1:
+            # 仅一个席位，放在弧顶 / Only one seat, place at arc top
+            x = cx
+            y = bottom_y - r
+            positions.append((x, y))
+        else:
+            # 弧上总扫描角度 = (count-1) * 角间距 / Total arc sweep angle = (count-1) * angular spacing
+            angular_spacing = spacing / r       # 弧长间距 → 角度间距（弧度） / arc spacing → angular spacing (radians)
+            total_angle = (count - 1) * angular_spacing
+            # 起始角 = π/2 + total_angle/2（左端），终 = π/2 - total_angle/2（右端）
+            # Start angle = π/2 + total_angle/2 (left end), end = π/2 - total_angle/2 (right end)
+            # 等价于从 π/2 + half 扫到 π/2 - half / Equivalent to sweeping from π/2 + half to π/2 - half
+            half_angle = total_angle / 2.0
+            for i in range(count):
+                theta = (math.pi / 2 + half_angle) - i * angular_spacing
+                x = cx + r * math.cos(theta)
+                y = bottom_y - r * math.sin(theta)
+                positions.append((x, y))
+
+    return positions
+
+
+# ════════════════════ SVG 渲染 / SVG Rendering ════════════════════
+
+def render_svg(title, parties, seats, out_path, width, dot_size, empty_count):
+    dot_r = dot_size / 2
+    height = int(width * 0.65)
+    cx = width / 2
+    bottom_y = height - PAD
+    # radius_max 同时受高度和宽度约束，确保席位不超出画布 / constrained by both height and width
+    radius_max = min((height - PAD * 2) * 0.92,
+                     (width - PAD * 2) / 2)
+    total = len(seats)
+
+    # 智能环宽：根据总席位自动计算 / Smart ring gap: auto-compute from total seats
+    arc_gap = smart_ring_gap(total, radius_max, dot_r, MIN_LAYERS, MAX_LAYERS, width, PAD)
+
+    positions = chamber_layout(total, cx, bottom_y, radius_max, dot_r, arc_gap)
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{width}" height="{height}" '
+        f'style="background:rgb(248,248,248)">\n'
+    ]
+    if title:
+        parts.append(
+            f'  <text x="{PAD}" y="{PAD+48}" '
+            f'font-family="sans-serif" font-size="16" fill="#222">'
+            f'{title.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")}'
+            f'</text>\n'
+        )
+
+    def _box(d):
+        return d * 0.7
+
+    for (x, y), seat in zip(positions, seats):
+        if seat is EMPTY_SEAT:
+            parts.append(
+                f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="{dot_r:.1f}" '
+                f'fill="#e0e0e0" stroke="#b0b0b0" stroke-width="{max(0.5, dot_r*0.15):.1f}"/>\n'
+            )
+        else:
+            c = seat["color"]
+            if not c.startswith("#"):
+                c = "#" + c
+            parts.append(
+                f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="{dot_r:.1f}" fill="{c}"/>\n'
+            )
+
+    lx = width - PAD - 220
+    ly = PAD + 18
+    for p in parties:
+        pc = p["color"]
+        if not pc.startswith("#"):
+            pc = "#" + pc
+        parts.append(
+            f'  <rect x="{lx}" y="{ly}" width="{_box(dot_size)}" '
+            f'height="{_box(dot_size)}" fill="{pc}" rx="2"/>\n'
+        )
+        parts.append(
+            f'  <text x="{lx+_box(dot_size)+6}" y="{ly+_box(dot_size)+1}" '
+            f'font-family="sans-serif" font-size="13" fill="#333">'
+            f'{p["name"].replace("&","&amp;").replace("<","&lt;")} ({p["seats"]})</text>\n'
+        )
+        ly += _box(dot_size) + 8
+    if empty_count > 0:
+        parts.append(
+            f'  <rect x="{lx}" y="{ly}" width="{_box(dot_size)}" '
+            f'height="{_box(dot_size)}" fill="none" stroke="#b0b0b0" stroke-width="1" rx="2"/>\n'
+        )
+        parts.append(
+            f'  <text x="{lx+_box(dot_size)+6}" y="{ly+_box(dot_size)+1}" '
+            f'font-family="sans-serif" font-size="13" fill="#333">空席 / Empty ({empty_count})</text>\n'
+        )
+
+    parts.append('</svg>')
+    Path(out_path).write_text(''.join(parts), encoding='utf-8')
+    filled = total - empty_count
+    if empty_count > 0:
+        print(f"[OK] SVG 已生成 / SVG generated：{Path(out_path).resolve()}  （{filled} 已分配 / allocated + {empty_count} 空席 / empty = {total} 席 / seats）")
+    else:
+        print(f"[OK] SVG 已生成 / SVG generated：{Path(out_path).resolve()}  （{total} 席 / seats）")
+
+
+# ════════════════════ 主流程 / Main ════════════════════
+
+def main():
+    # 固定读取同目录下的 data.txt / Always read data.txt in the same folder
+    script_dir = Path(__file__).parent
+    data_path = script_dir / "data.txt"
+
+    print("═" * 50)
+    print("  半圆议会席位图生成器 / Semicircle Parliament Seat Map Generator")
+    print("═" * 50)
+    print()
+    print(f"[i] 读取数据 / Reading data：{data_path}")
+
+    title, parties = parse_data_txt(str(data_path))
+
+    seats = build_seat_list(parties, EMPTY)
+    total = len(seats)
+    if total == 0:
+        print("[X] 总席位 = 0，请检查 data.txt / Total seats = 0, please check data.txt")
+        sys.exit(1)
+
+    print(f"[=] {len(parties)} 个党派 / parties，共 / total {total} 席 / seats" + (f"（含 / incl. {EMPTY} 空席 / empty）" if EMPTY else ""))
+    if title:
+        print(f"[T] 标题 / Title：{title}")
+    # 预计算环宽用于显示 / Pre-compute arc gap for display
+    dot_r = DOT_SIZE / 2
+    height = int(WIDTH * 0.65)
+    radius_max = min((height - PAD * 2) * 0.92,
+                     (WIDTH - PAD * 2) / 2)
+    arc_gap = smart_ring_gap(total, radius_max, dot_r, MIN_LAYERS, MAX_LAYERS, WIDTH, PAD)
+    print(f"[G] 智能环宽 / Smart ring gap：{arc_gap:.1f} px（层数目标 / target layers：{MIN_LAYERS}~{MAX_LAYERS}）")
+    print()
+
+    if OUTPUT:
+        out = str(script_dir / OUTPUT)
+    else:
+        # 用标题命名文件，去除不能当文件名的字符，默认 fallback 为 seatmap
+        # Auto-name file from title, strip invalid filename chars, default fallback = seatmap
+        safe_title = title.strip() if title else ""
+        if safe_title:
+            # 去掉不能当文件名的字符：<>:"/\|?* / Strip invalid filename chars: <>:"/\|?*
+            safe_title = re.sub(r'[<>:"/\\|?*]', '', safe_title)
+            safe_title = safe_title.strip()
+        if not safe_title:
+            safe_title = "seatmap"
+        out = str(script_dir / f"{safe_title}.svg")
+    render_svg(title, parties, seats, out, WIDTH, DOT_SIZE, EMPTY)
+
+    print()
+    print("[Done] 完成！按任意键退出... / Done! Press any key to exit...")
+    try:
+        input()
+    except EOFError:
+        pass
+
+
+if __name__ == "__main__":
+    main()

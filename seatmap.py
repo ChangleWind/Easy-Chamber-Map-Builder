@@ -16,21 +16,21 @@ import io, json, math, os, re, sys, tempfile
 from pathlib import Path
 
 # ════════════════════ 可调参数 / Tunable Parameters ════════════════════
-# 如果你觉得图太大/太小/点太大/太小，改下面几个数字就行
-# If the chart is too big/small or dots are too big/small, tweak the numbers below
+# 如果你觉得图太大/太小，改下面几个数字就行
+# If the chart is too big/small, tweak the numbers below
 
-WIDTH      = 1200        # 图片宽度（像素），越大越清晰 / Image width (px), larger = sharper
-DOT_SIZE   = 14          # 每个席位小圆点的直径（像素） / Diameter of each seat dot (px)
+WIDTH      = 360         # 图片宽度（像素） / Image width (px)
+HEIGHT     = 185         # 图片高度（像素） / Image height (px)
 EMPTY      = 0           # 空缺席位数（灰色空心圆），0 表示没有空席 / Empty seats (grey hollow circles), 0 = none
 OUTPUT     = None        # 设为 None 则用标题自动命名文件；也可手动指定固定文件名
                           # Set to None to auto-name file from title; or manually specify a fixed filename
 
 # ════════════════════ 内部参数（一般不用动） / Internal Params (usually don't touch) ═════════════════════
-PAD        = 40          # 四边留白 / Padding on all sides
-MIN_LAYERS = 5           # 最少层数，小国会至少撑到这个层数 / Minimum layers, small parliaments expand to at least this
+PAD        = 8           # 四边留白 / Padding on all sides
+FONT_SIZE  = 18          # 底部数字字号（固定，作为布局基准）/ Bottom number font size (fixed, layout anchor)
+EDGE_GAP   = 1.0         # 席位之间边缘间距（像素），保证席位不粘连 / Edge gap between seats (px), ensures seats don't touch
 MAX_LAYERS = 30          # 最多层数，防止席位过多时层数爆炸 / Maximum layers, prevents layer explosion for huge parliaments
-GAP        = 5.0         # 席位之间固定的边缘间距（像素），席位多则扇环更厚而非间距更密
-                          # Fixed edge gap between seats (px); more seats → thicker arc, not tighter spacing
+MIN_LAYERS = 3           # 最少层数 / Minimum layers
 
 # 空缺席位标记 / Empty seat marker
 EMPTY_SEAT = object()
@@ -129,98 +129,70 @@ def build_seat_list(parties, empty_count=0):
     return seats
 
 
-def smart_ring_gap(total, radius_max, dot_r, fixed_gap, min_layers, max_layers, canvas_width, pad):
+def auto_layout(total, radius_max, font_size, min_layers, max_layers, edge_gap):
     """
-    智能环宽函数 / Smart ring gap function：
-      席位之间的弧上边缘间距保持固定（fixed_gap），席位多 → 层数多 → 扇环更厚。
-      只在以下情况微调：
-        1. 层数 < min_layers：适度缩小间距撑到最少层数（避免扇环过薄）
-        2. 层数 > max_layers：最内层用紧凑间距排剩余席位（避免圆心处堆积）
+    自动布局 / Auto layout：
+      根据总席位数自动计算席位圆点半径(dot_r)和层数(layers)。
+      数字字号固定为基准，弧顶到数字之间约5个字号高度。
+      席位之间保留固定边缘间距，保证视觉上不粘连。
       ────────────────────────────────────────────────────────────────
-      Fixed edge gap between seats; more seats → more layers → thicker arc.
-      Only tweaks in edge cases:
-        1. layers < min_layers: moderately shrink spacing for minimum thickness
-        2. layers > max_layers: pack remaining seats tightly on innermost layer
+      Given total seats, auto-compute dot radius and number of layers.
+      Font size is fixed as the anchor; arc top to number ~5 font heights.
+      Fixed edge gap between seats ensures they never visually merge.
+    
+    返回 (dot_r, layers) / Returns (dot_r, layers)
     """
-    spacing = dot_r * 2 + fixed_gap
-
-    def simulate_layers(s, respect_min_r=True):
-        """
-        模拟排布。respect_min_r=True 时 r < dot_r 不再建新层；
-        False 时继续排到完（用于层数上限检测）。
-        """
-        remaining = total
-        r = radius_max
-        layers = 0
-        cx = canvas_width / 2
-        oob = 0
-
-        while remaining > 0 and layers < 300:
-            if respect_min_r and r < dot_r:
-                # 半径太小，剩余席位不再开新层，记为最后一层 / Radius too small, stop here
-                layers += 1
-                break
-            capacity = max(1, int(math.pi * r / s))
-            take = min(capacity, remaining)
-            remaining -= take
-            layers += 1
-            r -= s
-
-            if layers == 1 and take > 1:
-                ang = s / radius_max
-                half = (take - 1) * ang / 2
-                left_x = cx + radius_max * math.cos(math.pi / 2 + half)
-                right_x = cx + radius_max * math.cos(math.pi / 2 - half)
-                oob = max(0, pad - left_x) + max(0, right_x - (canvas_width - pad))
-
-        return layers, oob
-
-    # 先用固定间距模拟 / First simulate with fixed spacing
-    layers, oob = simulate_layers(spacing)
-
-    # 层数太少（扇环太薄）：适度缩小间距 / Too few layers (arc too thin): moderately shrink spacing
-    if layers < min_layers:
-        target = min_layers
-        lo, hi = dot_r * 2, spacing
-        for _ in range(40):
-            mid = (lo + hi) / 2.0
-            l, _ = simulate_layers(mid)
-            if l >= target:
-                hi = mid
+    # 层间距 = 直径 + 边缘间距 / Layer spacing = diameter + edge gap
+    # 席位圆心弧上间距 = 直径 + 边缘间距 / Arc spacing between centers = diameter + edge gap
+    
+    def capacity_for_dot_r(dr, L):
+        """给定 dot_r 和层数，计算总容量"""
+        spacing = dr * 2 + edge_gap
+        cap = 0
+        for layer in range(L):
+            r = radius_max - layer * spacing
+            if r < dr:
+                cap += 1
             else:
-                lo = mid
-        spacing = hi
-        layers, oob = simulate_layers(spacing)
+                cap += max(1, int(math.pi * r / spacing))
+        return cap
+    
+    # 二分搜索：找到刚好容纳 total 席位的最大 dot_r（给定层数）
+    def find_dot_r_for_layers(total_seats, L):
+        # 宽范围的二分搜索
+        lo, hi = 0.5, radius_max
+        for _ in range(80):
+            mid = (lo + hi) / 2
+            if capacity_for_dot_r(mid, L) >= total_seats:
+                lo = mid  # 容量够，尝试更大的 dot_r
+            else:
+                hi = mid  # 容量不够，缩小 dot_r
+        return lo  # 返回最大可行的 dot_r
+    
+    # 用公式估算目标层数：total ≈ k * L²，系数随 edge_gap 调整
+    # Estimate target layers: total ≈ k * L², coefficient varies with edge_gap
+    k = 3.2 + edge_gap * 0.5
+    target_L = max(min_layers, min(max_layers, int(math.sqrt(total / k) + 0.5)))
+    
+    # 先试目标层数，不够就逐层增加
+    for L in range(target_L, max_layers + 1):
+        dr = find_dot_r_for_layers(total, L)
+        cap = capacity_for_dot_r(dr, L)
+        if cap >= total:
+            return dr, L
+    
+    # 兜底
+    dr = find_dot_r_for_layers(total, max_layers)
+    return dr, max_layers
 
-    # 层数爆炸（席位太多）：外 MAX_LAYERS 层用固定间距，剩余全塞最内层
-    # Layers exploding: outer MAX_LAYERS layers use fixed spacing, rest crammed into innermost
-    raw_layers, _ = simulate_layers(spacing, respect_min_r=False)
-    if raw_layers > max_layers:
-        # 标记需要在内层紧凑排布 / Flag that inner layer needs compact packing
-        spacing = spacing  # 保持固定间距不变 / keep fixed spacing unchanged
 
-    # 越界回退：缩小间距 / Out-of-bounds fallback: shrink spacing
-    if oob > 0:
-        for _ in range(40):
-            spacing += 1.0
-            _, new_oob = simulate_layers(spacing)
-            if new_oob == 0:
-                break
-            if spacing > radius_max:
-                break
-
-    arc_gap = spacing - dot_r * 2
-    return max(0.0, arc_gap)
-
-
-def chamber_layout(total, cx, bottom_y, radius_max, dot_r, arc_gap, max_layers=30):
+def chamber_layout(total, cx, bottom_y, radius_max, dot_r, layers, edge_gap):
     """
     核心布局算法 / Core layout algorithm：
-      - 每个席位之间弧上圆心间距固定 = dot_size + arc_gap
-        Fixed arc distance between seat centers = dot_size + arc_gap
-      - 从最外层开始逐层填充 / Fill layer by layer from outermost
-      - 前 max_layers-1 层用固定间距；超出部分紧凑排在最内层（保持扇环比例）
-        First max_layers-1 layers use fixed spacing; overflow packed tightly on innermost layer
+      - 席位之间保留固定边缘间距，圆心间距 = 直径 + edge_gap
+        Fixed edge gap between seats, center spacing = diameter + edge_gap
+      - 从最外层开始逐层填充，共 layers 层
+        Fill layer by layer from outermost, total `layers` layers
       - 不是强制半圆，弧扫多大角度由该层席位数量决定
         Not a forced semicircle; arc sweep angle is determined by seat count on that layer
     返回 [(x, y), ...] / Returns [(x, y), ...]
@@ -229,51 +201,30 @@ def chamber_layout(total, cx, bottom_y, radius_max, dot_r, arc_gap, max_layers=3
     if total <= 0:
         return positions
 
-    # 圆心之间沿弧的间距（像素） / Arc distance between centers (px)
-    spacing = dot_r * 2 + arc_gap
+    spacing = dot_r * 2 + edge_gap  # 圆心间距 / center spacing
 
-    # 先决定分几层、每层放几个 / First decide how many layers and seats per layer
-    layers = []
+    # 计算每层放几个 / Decide seats per layer
+    layer_counts = []
     remaining = total
-    layer_idx = 0
-
-    # 前 max_layers-1 层：正常间距排布 / First max_layers-1 layers: normal spacing
-    while remaining > 0 and layer_idx < max_layers - 1:
-        r = radius_max - layer_idx * spacing
+    for li in range(layers):
+        r = radius_max - li * spacing
         if r < dot_r:
-            # 半径太小，剩余全塞这一层 / Radius too small, cram rest here
-            layers.append(remaining)
-            remaining = 0
-            break
-        arc_len = math.pi * r
-        capacity = max(1, int(arc_len / spacing))
-        take = min(capacity, remaining)
-        layers.append(take)
+            cap = 1
+        else:
+            cap = max(1, int(math.pi * r / spacing))
+        take = min(cap, remaining)
+        layer_counts.append(take)
         remaining -= take
-        layer_idx += 1
+        if remaining <= 0:
+            break
 
-    # 如果还有剩余席位，全塞最后一层 / If seats remain, cram all into innermost layer
-    if remaining > 0:
-        layers.append(remaining)
-        layer_idx += 1
+    # 如果还有剩余，全塞最后一层 / If seats remain, cram into last layer
+    if remaining > 0 and layer_counts:
+        layer_counts[-1] += remaining
 
     # 逐层绘制 / Draw layer by layer
-    for li, count in enumerate(layers):
+    for li, count in enumerate(layer_counts):
         r = max(dot_r, radius_max - li * spacing)
-
-        # 最后一层如果席位密度过高，使用紧凑间距 / Innermost layer: use compact spacing if crowded
-        if li == len(layers) - 1 and count > 1 and r <= dot_r * 3:
-            # 紧凑模式：席位之间边缘间距 = dot_r（比正常间距小）/ Compact mode: edge gap = dot_r
-            compact_spacing = dot_r * 2 + dot_r
-            compact_angular = compact_spacing / r
-            compact_total = (count - 1) * compact_angular
-            compact_half = compact_total / 2.0
-            for i in range(count):
-                theta = (math.pi / 2 + compact_half) - i * compact_angular
-                x = cx + r * math.cos(theta)
-                y = bottom_y - r * math.sin(theta)
-                positions.append((x, y))
-            continue
 
         if count == 1:
             x = cx
@@ -294,42 +245,46 @@ def chamber_layout(total, cx, bottom_y, radius_max, dot_r, arc_gap, max_layers=3
 
 # ════════════════════ SVG 渲染 / SVG Rendering ════════════════════
 
-def render_svg(title, parties, seats, out_path, width, dot_size, empty_count):
-    dot_r = dot_size / 2
-    height = int(width * 0.65)
+def render_svg(title, parties, seats, out_path, width, height, empty_count):
     cx = width / 2
     bottom_y = height - PAD
-    # radius_max 同时受高度和宽度约束，确保席位不超出画布 / constrained by both height and width
-    radius_max = min((height - PAD * 2) * 0.92,
-                     (width - PAD * 2) / 2)
     total = len(seats)
 
-    # 智能环宽：固定间距优先，席位多则层数多 / Smart ring gap: fixed spacing first, more seats = more layers
-    arc_gap = smart_ring_gap(total, radius_max, dot_r, GAP, MIN_LAYERS, MAX_LAYERS, width, PAD)
+    # 数字放在画布底部，预留呼吸空间 / Number at canvas bottom with breathing room
+    number_y = height - FONT_SIZE * 0.85
 
-    positions = chamber_layout(total, cx, bottom_y, radius_max, dot_r, arc_gap, MAX_LAYERS)
+    # 弧顶到数字之间约 5 个字号高度 / Arc top to number: ~5 font heights
+    arc_top_y = number_y - 5 * FONT_SIZE
+    radius_max = bottom_y - arc_top_y
+
+    # 同时受宽度约束 / Also constrained by width
+    radius_max = min(radius_max, (width - PAD * 2) / 2)
+
+    # 自动布局 / Auto layout
+    dot_r, layers = auto_layout(total, radius_max, FONT_SIZE, MIN_LAYERS, MAX_LAYERS, EDGE_GAP)
+
+    positions = chamber_layout(total, cx, bottom_y, radius_max, dot_r, layers, EDGE_GAP)
+
+    # 根据实际弧底位置调整数字 Y：数字放在最外层席位底部下方，但不超过底部留白
+    # Adjust number Y: place below outermost seat bottoms, but clamp to bottom padding
+    if positions:
+        arc_bottom_y = max(y for _, y in positions) + dot_r  # 席位底部边缘
+        number_y = arc_bottom_y + FONT_SIZE * 0.10
+        # 确保数字不超出底部留白 / Ensure number stays within bottom padding
+        number_y = min(height - PAD * 0.6, number_y)
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'width="{width}" height="{height}" '
         f'style="background:rgb(248,248,248)">\n'
     ]
-    if title:
-        parts.append(
-            f'  <text x="{PAD}" y="{PAD+48}" '
-            f'font-family="sans-serif" font-size="16" fill="#222">'
-            f'{title.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")}'
-            f'</text>\n'
-        )
-
-    def _box(d):
-        return d * 0.7
 
     for (x, y), seat in zip(positions, seats):
         if seat is EMPTY_SEAT:
+            stroke_w = max(0.5, dot_r * 0.15)
             parts.append(
                 f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="{dot_r:.1f}" '
-                f'fill="#e0e0e0" stroke="#b0b0b0" stroke-width="{max(0.5, dot_r*0.15):.1f}"/>\n'
+                f'fill="#e0e0e0" stroke="#b0b0b0" stroke-width="{stroke_w:.1f}"/>\n'
             )
         else:
             c = seat["color"]
@@ -339,31 +294,13 @@ def render_svg(title, parties, seats, out_path, width, dot_size, empty_count):
                 f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="{dot_r:.1f}" fill="{c}"/>\n'
             )
 
-    lx = width - PAD - 220
-    ly = PAD + 18
-    for p in parties:
-        pc = p["color"]
-        if not pc.startswith("#"):
-            pc = "#" + pc
-        parts.append(
-            f'  <rect x="{lx}" y="{ly}" width="{_box(dot_size)}" '
-            f'height="{_box(dot_size)}" fill="{pc}" rx="2"/>\n'
-        )
-        parts.append(
-            f'  <text x="{lx+_box(dot_size)+6}" y="{ly+_box(dot_size)+1}" '
-            f'font-family="sans-serif" font-size="13" fill="#333">'
-            f'{p["name"].replace("&","&amp;").replace("<","&lt;")} ({p["seats"]})</text>\n'
-        )
-        ly += _box(dot_size) + 8
-    if empty_count > 0:
-        parts.append(
-            f'  <rect x="{lx}" y="{ly}" width="{_box(dot_size)}" '
-            f'height="{_box(dot_size)}" fill="none" stroke="#b0b0b0" stroke-width="1" rx="2"/>\n'
-        )
-        parts.append(
-            f'  <text x="{lx+_box(dot_size)+6}" y="{ly+_box(dot_size)+1}" '
-            f'font-family="sans-serif" font-size="13" fill="#333">空席 / Empty ({empty_count})</text>\n'
-        )
+    # 底部中心：加粗席位总数
+    # Bottom center: bold total seat count
+    parts.append(
+        f'  <text x="{width/2:.1f}" y="{number_y:.1f}" '
+        f'font-family="sans-serif" font-size="{FONT_SIZE}" font-weight="700" '
+        f'fill="#333" text-anchor="middle">{total}</text>\n'
+    )
 
     parts.append('</svg>')
     Path(out_path).write_text(''.join(parts), encoding='utf-8')
@@ -378,7 +315,12 @@ def render_svg(title, parties, seats, out_path, width, dot_size, empty_count):
 
 def main():
     # 固定读取同目录下的 data.txt / Always read data.txt in the same folder
-    script_dir = Path(__file__).parent
+    # 兼容 exe 打包：PyInstaller 打包后 __file__ 指向临时目录，改用 sys.executable
+    # Compatible with exe: PyInstaller redirects __file__ to temp, use sys.executable instead
+    if getattr(sys, 'frozen', False):
+        script_dir = Path(sys.executable).parent
+    else:
+        script_dir = Path(__file__).parent
     data_path = script_dir / "data.txt"
 
     print("═" * 50)
@@ -398,13 +340,14 @@ def main():
     print(f"[=] {len(parties)} 个党派 / parties，共 / total {total} 席 / seats" + (f"（含 / incl. {EMPTY} 空席 / empty）" if EMPTY else ""))
     if title:
         print(f"[T] 标题 / Title：{title}")
-    # 预计算环宽用于显示 / Pre-compute arc gap for display
-    dot_r = DOT_SIZE / 2
-    height = int(WIDTH * 0.65)
-    radius_max = min((height - PAD * 2) * 0.92,
-                     (WIDTH - PAD * 2) / 2)
-    arc_gap = smart_ring_gap(total, radius_max, dot_r, GAP, MIN_LAYERS, MAX_LAYERS, WIDTH, PAD)
-    print(f"[G] 固定边缘间距 / Fixed edge gap：{GAP:.1f} px → 实际环宽 / actual arc_gap：{arc_gap:.1f} px（层数 / layers：{MIN_LAYERS}~{MAX_LAYERS}）")
+    # 预计算布局信息用于显示 / Pre-compute layout info for display
+    bottom_y = HEIGHT - PAD
+    number_y = HEIGHT - FONT_SIZE * 0.85
+    arc_top_y = number_y - 5 * FONT_SIZE
+    radius_max = bottom_y - arc_top_y
+    radius_max = min(radius_max, (WIDTH - PAD * 2) / 2)
+    dot_r, layers = auto_layout(total, radius_max, FONT_SIZE, MIN_LAYERS, MAX_LAYERS, EDGE_GAP)
+    print(f"[L] 自动布局 / Auto layout：dot_r={dot_r:.1f}px（直径={dot_r*2:.1f}px），层数 / layers={layers}，边缘间距 / edge gap={EDGE_GAP:.1f}px")
     print()
 
     if OUTPUT:
@@ -420,7 +363,7 @@ def main():
         if not safe_title:
             safe_title = "seatmap"
         out = str(script_dir / f"{safe_title}.svg")
-    render_svg(title, parties, seats, out, WIDTH, DOT_SIZE, EMPTY)
+    render_svg(title, parties, seats, out, WIDTH, HEIGHT, EMPTY)
 
     print()
     print("[Done] 完成！按任意键退出... / Done! Press any key to exit...")

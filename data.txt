@@ -11,6 +11,7 @@
 #    · # 开头的是注释，会被忽略 / Lines starting with # are comments, ignored
 #    · 党派名、席位、颜色之间用空格或 Tab 隔开 / Separate party, seats, color with spaces or Tab
 #    · 颜色写 #RRGGBB 或者纯 RRGGBB 都行 / Color can be #RRGGBB or plain RRGGBB
+#    · 标题、党派名称可以只写中文或者英文 / Titles and party names may be written in either Chinese or English only   
 #    常见颜色 / Common Colors：
 #    E1192C （红 / Red）
 #    2B4EA0 （深蓝 / Deep Blue）

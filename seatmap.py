@@ -25,6 +25,8 @@ EMPTY      = 0           # 空缺席位数（灰色空心圆），0 表示没有
 OUTPUT     = None        # 设为 None 则用标题自动命名文件；也可手动指定固定文件名
                           # Set to None to auto-name file from title; or manually specify a fixed filename
 
+SEAT_SCALE  = 0.75       # 席位圆点缩放系数，让所有圆点变小 / Seat dot scale factor, makes all dots smaller
+
 # ════════════════════ 内部参数（一般不用动） / Internal Params (usually don't touch) ═════════════════════
 PAD        = 8           # 四边留白 / Padding on all sides
 FONT_SIZE  = 18          # 底部数字字号（固定，作为布局基准）/ Bottom number font size (fixed, layout anchor)
@@ -265,11 +267,14 @@ def render_svg(title, parties, seats, out_path, width, height, empty_count):
 
     positions = chamber_layout(total, cx, bottom_y, radius_max, dot_r, layers, EDGE_GAP)
 
+    # 缩小席位圆圈视觉尺寸 / Shrink visual seat circle size
+    dot_r *= SEAT_SCALE
+
     # 根据实际弧底位置调整数字 Y：数字放在最外层席位底部下方，但不超过底部留白
     # Adjust number Y: place below outermost seat bottoms, but clamp to bottom padding
     if positions:
         arc_bottom_y = max(y for _, y in positions) + dot_r  # 席位底部边缘
-        number_y = arc_bottom_y + FONT_SIZE * 0.10
+        number_y = height - 11
         # 确保数字不超出底部留白 / Ensure number stays within bottom padding
         number_y = min(height - PAD * 0.6, number_y)
 
